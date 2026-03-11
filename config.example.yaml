@@ -1,0 +1,4 @@
+drive_folder_id: "FOLDER_ID"
+download_dir: "./tmp"
+credentials_file: "./credentials.json"
+token_file: "./token.json"
