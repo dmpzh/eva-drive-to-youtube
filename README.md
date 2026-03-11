@@ -51,13 +51,18 @@ eva-cli list --date yesterday
 Upload one or more sessions:
 
 ```bash
+eva-cli upload --date yesterday
 eva-cli upload --date 2026-03-10
 eva-cli upload --date yesterday --sessions "1 2"
 ```
 
-Without `--sessions`, the CLI opens an interactive multi-select prompt. Use the arrow keys to move, space to toggle sessions, and enter to confirm.
+Without `--sessions`, the CLI opens an interactive multi-select prompt showing the available sessions. Use the arrow keys to move, space to toggle a session, and enter to confirm the upload.
 
 When multiple sessions are selected, the tool generates an FFmpeg concat list and merges the videos without re-encoding when possible.
+
+Before uploading, the CLI asks for the title suffix and pre-fills `Session Review`. You can press enter to keep it, or replace it with something else such as `Training Review`.
+
+Before any download starts, the CLI shows a final summary with the selected sessions, the YouTube title, and the privacy status, then asks for confirmation.
 
 ## Quick start for login
 

@@ -64,7 +64,7 @@ var uploadCmd = &cobra.Command{
 
 		printSessions(files)
 
-		selectedIndexes, err := resolveSelection(len(files), uploadSelection)
+		selectedIndexes, err := resolveSelection(files, uploadSelection)
 		if err != nil {
 			return err
 		}
@@ -72,6 +72,15 @@ var uploadCmd = &cobra.Command{
 		selectedFiles := make([]googleclient.DriveFile, 0, len(selectedIndexes))
 		for _, index := range selectedIndexes {
 			selectedFiles = append(selectedFiles, files[index])
+		}
+
+		uploadTitle, err := resolveUploadTitle(selectedDate)
+		if err != nil {
+			return err
+		}
+
+		if err := confirmUploadPlan(selectedFiles, uploadTitle); err != nil {
+			return err
 		}
 
 		workingDir, err := os.MkdirTemp(cfg.DownloadDir, "eva-upload-*")
@@ -105,7 +114,7 @@ var uploadCmd = &cobra.Command{
 		}
 
 		result, err := youtubeService.UploadVideo(ctx, videoPath, googleclient.UploadOptions{
-			Title:         fmt.Sprintf("EVA VR - %s - Session Review", selectedDate.Format(config.DateFormat)),
+			Title:         uploadTitle,
 			Description:   "EVA VR gameplay replay for analysis.",
 			PrivacyStatus: "unlisted",
 		})
@@ -126,14 +135,79 @@ func init() {
 	rootCmd.AddCommand(uploadCmd)
 }
 
-func resolveSelection(max int, flagValue string) ([]int, error) {
+func resolveUploadTitle(selectedDate interface{ Format(string) string }) (string, error) {
+	defaultSuffix := "Session Review"
+	if term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd())) {
+		var suffix string
+		prompt := &survey.Input{
+			Message: "Upload title suffix:",
+			Default: defaultSuffix,
+			Help:    "The final title will be formatted as EVA VR - YYYY-MM-DD - <suffix>",
+		}
+		if err := survey.AskOne(prompt, &suffix); err != nil {
+			return "", fmt.Errorf("read upload title suffix: %w", err)
+		}
+		if strings.TrimSpace(suffix) != "" {
+			defaultSuffix = strings.TrimSpace(suffix)
+		}
+	}
+
+	return fmt.Sprintf("EVA VR - %s - %s", selectedDate.Format(config.DateFormat), defaultSuffix), nil
+}
+
+func confirmUploadPlan(selectedFiles []googleclient.DriveFile, uploadTitle string) error {
+	if len(selectedFiles) == 0 {
+		return fmt.Errorf("no sessions selected")
+	}
+
+	fmt.Println()
+	fmt.Println("Upload summary:")
+	for _, file := range selectedFiles {
+		fmt.Printf("- %s\n", file.CreatedAt.Format("2006-01-02 15:04"))
+	}
+	fmt.Printf("Title: %s\n", uploadTitle)
+	fmt.Println("Privacy: unlisted")
+
+	if term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd())) {
+		confirmed := false
+		prompt := &survey.Confirm{
+			Message: "Continue with download and upload?",
+			Default: true,
+		}
+		if err := survey.AskOne(prompt, &confirmed); err != nil {
+			return fmt.Errorf("confirm upload: %w", err)
+		}
+		if !confirmed {
+			return fmt.Errorf("upload canceled")
+		}
+		return nil
+	}
+
+	fmt.Println()
+	fmt.Print("Continue with download and upload? [Y/n] ")
+	reader := bufio.NewReader(os.Stdin)
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		return fmt.Errorf("confirm upload: %w", err)
+	}
+
+	answer := strings.ToLower(strings.TrimSpace(line))
+	if answer == "" || answer == "y" || answer == "yes" {
+		return nil
+	}
+
+	return fmt.Errorf("upload canceled")
+}
+
+func resolveSelection(files []googleclient.DriveFile, flagValue string) ([]int, error) {
+	max := len(files)
 	input := strings.TrimSpace(flagValue)
 	if input != "" {
 		return parseSelection(input, max)
 	}
 
 	if term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd())) {
-		selected, err := interactiveSelection(max)
+		selected, err := interactiveSelection(files)
 		if err == nil {
 			return selected, nil
 		}
@@ -143,24 +217,37 @@ func resolveSelection(max int, flagValue string) ([]int, error) {
 	return manualSelection(max)
 }
 
-func interactiveSelection(max int) ([]int, error) {
-	options := make([]string, max)
-	for index := 0; index < max; index++ {
-		options[index] = strconv.Itoa(index + 1)
+func interactiveSelection(files []googleclient.DriveFile) ([]int, error) {
+	options := make([]string, 0, len(files))
+	optionIndexes := make(map[string]int, len(files))
+	for index, file := range files {
+		label := fmt.Sprintf("%d. %s", index+1, file.CreatedAt.Format("2006-01-02 15:04"))
+		options = append(options, label)
+		optionIndexes[label] = index
 	}
 
-	selectedOptions := make([]string, 0, max)
+	selectedOptions := make([]string, 0, len(files))
 	prompt := &survey.MultiSelect{
-		Message:  "Select sessions to upload:",
+		Message:  "Select sessions to upload (use arrows, space, then enter):",
 		Options:  options,
-		PageSize: max,
+		PageSize: len(files),
 	}
 
 	if err := survey.AskOne(prompt, &selectedOptions); err != nil {
 		return nil, fmt.Errorf("interactive selection failed: %w", err)
 	}
 
-	return parseSelection(strings.Join(selectedOptions, " "), max)
+	indexes := make([]int, 0, len(selectedOptions))
+	for _, option := range selectedOptions {
+		index, exists := optionIndexes[option]
+		if !exists {
+			return nil, fmt.Errorf("unknown selected session %q", option)
+		}
+		indexes = append(indexes, index)
+	}
+
+	sort.Ints(indexes)
+	return indexes, nil
 }
 
 func manualSelection(max int) ([]int, error) {
