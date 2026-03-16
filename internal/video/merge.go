@@ -13,13 +13,26 @@ func MergeVideos(ctx context.Context, ffmpeg *FFmpeg, inputFiles []string, outpu
 		return fmt.Errorf("at least two input files are required to merge videos")
 	}
 
+	expectedDuration, err := validateVideoSet(ctx, ffmpeg, inputFiles)
+	if err != nil {
+		return err
+	}
+
 	listFilePath := filepath.Join(filepath.Dir(outputPath), "concat-list.txt")
 	if err := os.WriteFile(listFilePath, []byte(buildConcatList(inputFiles)), 0o644); err != nil {
 		return fmt.Errorf("write ffmpeg concat list: %w", err)
 	}
 	defer os.Remove(listFilePath)
 
-	return ffmpeg.Concat(ctx, listFilePath, outputPath)
+	if err := ffmpeg.Concat(ctx, listFilePath, outputPath); err != nil {
+		return err
+	}
+
+	if err := ensureMergedDuration(ctx, ffmpeg, outputPath, expectedDuration, len(inputFiles)); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func buildConcatList(inputFiles []string) string {

@@ -72,31 +72,44 @@ type uploadReporter struct {
 	total   int64
 	current int64
 	lastLog time.Time
+	line    *terminalLine
 }
 
 func newUploadReporter(total int64) *uploadReporter {
-	return &uploadReporter{total: total}
+	return &uploadReporter{total: total, line: newTerminalLine()}
 }
 
 func (r *uploadReporter) Update(current int64) {
 	r.current = current
+	if r.line.interactive {
+		r.render(false)
+		return
+	}
 	if time.Since(r.lastLog) < time.Second && current < r.total {
 		return
 	}
 	r.lastLog = time.Now()
+	r.render(false)
+}
+
+func (r *uploadReporter) render(done bool) {
 
 	if r.total > 0 {
-		percent := float64(current) / float64(r.total) * 100
-		fmt.Printf("Uploading to YouTube: %.1f%% (%s/%s)\n", percent, humanBytes(current), humanBytes(r.total))
+		percent := float64(r.current) / float64(r.total) * 100
+		r.line.Render(fmt.Sprintf("Uploading to YouTube: %.1f%% (%s/%s)", percent, humanBytes(r.current), humanBytes(r.total)), done)
 		return
 	}
 
-	fmt.Printf("Uploading to YouTube: %s\n", humanBytes(current))
+	r.line.Render(fmt.Sprintf("Uploading to YouTube: %s", humanBytes(r.current)), done)
 }
 
 func (r *uploadReporter) Finish() {
 	if r.total > 0 {
-		fmt.Printf("Uploading to YouTube: 100.0%% (%s/%s)\n", humanBytes(r.total), humanBytes(r.total))
+		r.current = r.total
+	}
+	r.render(true)
+	if !r.line.interactive {
+		r.lastLog = time.Now()
 	}
 }
 

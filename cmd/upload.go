@@ -22,6 +22,7 @@ import (
 
 var uploadDate string
 var uploadSelection string
+var uploadIgnoreCorrupt bool
 
 var uploadCmd = &cobra.Command{
 	Use:   "upload",
@@ -89,18 +90,25 @@ var uploadCmd = &cobra.Command{
 		}
 		defer os.RemoveAll(workingDir)
 
+		ffmpeg := video.NewFFmpeg("ffmpeg")
+		if err := ffmpeg.CheckAvailable(ctx); err != nil {
+			return err
+		}
+
 		downloadedFiles, err := downloadFiles(ctx, driveService, workingDir, selectedFiles)
 		if err != nil {
 			return err
 		}
+		selectedFiles, downloadedFiles, err = filterValidFiles(ctx, ffmpeg, selectedFiles, downloadedFiles, uploadIgnoreCorrupt)
+		if err != nil {
+			return err
+		}
+		if len(downloadedFiles) == 0 {
+			return fmt.Errorf("no valid sessions remain after validation, upload canceled")
+		}
 
 		videoPath := downloadedFiles[0]
 		if len(downloadedFiles) > 1 {
-			ffmpeg := video.NewFFmpeg("ffmpeg")
-			if err := ffmpeg.CheckAvailable(ctx); err != nil {
-				return err
-			}
-
 			mergedPath := filepath.Join(workingDir, buildMergedFilename(selectedDate, selectedFiles))
 			if err := video.MergeVideos(ctx, ffmpeg, downloadedFiles, mergedPath); err != nil {
 				return err
@@ -131,6 +139,7 @@ var uploadCmd = &cobra.Command{
 func init() {
 	uploadCmd.Flags().StringVar(&uploadDate, "date", "", "Date to upload (YYYY-MM-DD, today, or yesterday)")
 	uploadCmd.Flags().StringVar(&uploadSelection, "sessions", "", "Session numbers to upload, for example: \"1 2\"")
+	uploadCmd.Flags().BoolVar(&uploadIgnoreCorrupt, "ignore-corrupt", false, "Skip sessions that are still invalid after re-downloading them")
 	_ = uploadCmd.MarkFlagRequired("date")
 	rootCmd.AddCommand(uploadCmd)
 }
@@ -297,13 +306,14 @@ func parseSelection(input string, max int) ([]int, error) {
 func downloadFiles(ctx context.Context, driveService *googleclient.DriveService, workingDir string, files []googleclient.DriveFile) ([]string, error) {
 	paths := make([]string, len(files))
 	group, groupCtx := errgroup.WithContext(ctx)
+	progressGroup := googleclient.NewDownloadProgressGroup(files)
 
 	for index, file := range files {
 		index := index
 		file := file
 		group.Go(func() error {
 			targetPath := filepath.Join(workingDir, fmt.Sprintf("%02d-%s", index+1, sanitizeFilename(file.Name)))
-			if err := driveService.DownloadFile(groupCtx, file, targetPath); err != nil {
+			if err := driveService.DownloadFile(groupCtx, file, targetPath, progressGroup); err != nil {
 				return err
 			}
 			paths[index] = targetPath
@@ -316,6 +326,40 @@ func downloadFiles(ctx context.Context, driveService *googleclient.DriveService,
 	}
 
 	return paths, nil
+}
+
+func filterValidFiles(ctx context.Context, ffmpeg *video.FFmpeg, files []googleclient.DriveFile, paths []string, ignoreCorrupt bool) ([]googleclient.DriveFile, []string, error) {
+	validFiles := make([]googleclient.DriveFile, 0, len(files))
+	validPaths := make([]string, 0, len(paths))
+	skippedFiles := make([]string, 0)
+
+	for index, path := range paths {
+		if _, err := ffmpeg.ProbeDuration(ctx, path); err == nil {
+			validFiles = append(validFiles, files[index])
+			validPaths = append(validPaths, path)
+			continue
+		}
+
+		if !ignoreCorrupt {
+			return nil, nil, fmt.Errorf("downloaded file %q is invalid; rerun with --ignore-corrupt to skip it", files[index].Name)
+		}
+
+		fmt.Printf("Skipping corrupted video: %s\n", files[index].Name)
+		skippedFiles = append(skippedFiles, files[index].CreatedAt.Format("2006-01-02 15:04"))
+	}
+
+	if len(skippedFiles) > 0 {
+		fmt.Println("Skipped corrupted sessions:")
+		for _, skipped := range skippedFiles {
+			fmt.Printf("- %s\n", skipped)
+		}
+	}
+
+	if len(validPaths) == 0 {
+		return nil, nil, fmt.Errorf("all selected sessions are corrupted, upload canceled")
+	}
+
+	return validFiles, validPaths, nil
 }
 
 func buildMergedFilename(dateValue interface{ Format(string) string }, files []googleclient.DriveFile) string {

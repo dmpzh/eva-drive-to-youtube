@@ -90,7 +90,7 @@ func (d *DriveService) ListVideosByDate(ctx context.Context, folderID string, da
 	return files, nil
 }
 
-func (d *DriveService) DownloadFile(ctx context.Context, file DriveFile, targetPath string) error {
+func (d *DriveService) DownloadFile(ctx context.Context, file DriveFile, targetPath string, progressGroup *DownloadProgressGroup) error {
 	if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
 		return fmt.Errorf("create download directory: %w", err)
 	}
@@ -108,12 +108,26 @@ func (d *DriveService) DownloadFile(ctx context.Context, file DriveFile, targetP
 	if err != nil {
 		return fmt.Errorf("create file %q: %w", targetPath, err)
 	}
-	defer output.Close()
 
-	tracker := newProgressTracker("Downloading "+file.Name, file.Size)
+	tracker := newProgressTracker("Downloading "+file.Name, file.Name, file.Size, progressGroup)
 	if _, err := io.Copy(output, io.TeeReader(response.Body, tracker)); err != nil {
+		_ = output.Close()
 		return fmt.Errorf("write file %q: %w", targetPath, err)
 	}
+	if err := output.Close(); err != nil {
+		return fmt.Errorf("close file %q: %w", targetPath, err)
+	}
+
+	if file.Size > 0 {
+		stat, err := os.Stat(targetPath)
+		if err != nil {
+			return fmt.Errorf("stat file %q: %w", targetPath, err)
+		}
+		if stat.Size() != file.Size {
+			return fmt.Errorf("downloaded file %q has unexpected size: got %s, expected %s", file.Name, humanBytes(stat.Size()), humanBytes(file.Size))
+		}
+	}
+
 	tracker.Finish()
 
 	return nil
@@ -121,15 +135,27 @@ func (d *DriveService) DownloadFile(ctx context.Context, file DriveFile, targetP
 
 type progressTracker struct {
 	label     string
+	fileName  string
 	total     int64
 	current   int64
 	lastLog   time.Time
 	mu        sync.Mutex
 	completed bool
+	group     *DownloadProgressGroup
+	line      *terminalLine
 }
 
-func newProgressTracker(label string, total int64) *progressTracker {
-	return &progressTracker{label: label, total: total}
+func newProgressTracker(label, fileName string, total int64, group *DownloadProgressGroup) *progressTracker {
+	tracker := &progressTracker{
+		label:    label,
+		fileName: fileName,
+		total:    total,
+		group:    group,
+	}
+	if group == nil {
+		tracker.line = newTerminalLine()
+	}
+	return tracker
 }
 
 func (p *progressTracker) Write(data []byte) (int, error) {
@@ -137,6 +163,11 @@ func (p *progressTracker) Write(data []byte) (int, error) {
 	defer p.mu.Unlock()
 
 	p.current += int64(len(data))
+	if p.group != nil {
+		p.group.Update(p.fileName, p.current, p.total, false)
+		return len(data), nil
+	}
+
 	if time.Since(p.lastLog) >= time.Second {
 		p.logProgressLocked(false)
 		p.lastLog = time.Now()
@@ -152,13 +183,17 @@ func (p *progressTracker) Finish() {
 		return
 	}
 	p.completed = true
+	if p.group != nil {
+		p.group.Update(p.fileName, p.current, p.total, true)
+		return
+	}
 	p.logProgressLocked(true)
 }
 
 func (p *progressTracker) logProgressLocked(done bool) {
 	if p.total > 0 {
 		percent := float64(p.current) / float64(p.total) * 100
-		fmt.Printf("%s: %.1f%% (%s/%s)\n", p.label, percent, humanBytes(p.current), humanBytes(p.total))
+		p.line.Render(fmt.Sprintf("%s: %.1f%% (%s/%s)", p.label, percent, humanBytes(p.current), humanBytes(p.total)), done)
 		return
 	}
 
@@ -166,7 +201,7 @@ func (p *progressTracker) logProgressLocked(done bool) {
 	if done {
 		status = "done"
 	}
-	fmt.Printf("%s: %s (%s)\n", p.label, status, humanBytes(p.current))
+	p.line.Render(fmt.Sprintf("%s: %s (%s)", p.label, status, humanBytes(p.current)), done)
 }
 
 func sameDay(left, right time.Time) bool {
